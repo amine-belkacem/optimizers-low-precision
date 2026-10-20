@@ -18,8 +18,8 @@ try to train on a microcontroller, an accelerator or an FPGA.
 | J0 | Repository skeleton, CI, figure style | done |
 | J1 | The four optimizers, differential tests against PyTorch, Rosenbrock | done |
 | J2 | NumPy MLP on `digits`, learning-rate sensitivity over 10 seeds | done |
-| J3 | Number format emulator (fp32, fp16, bf16, Qm.n) | next |
-| J4 | Low-precision study | planned |
+| J3 | Number format emulator (fp32, fp16, bf16, Qm.n) | done |
+| J4 | Low-precision study | next |
 | J5 | Step time and optimizer memory on a Raspberry Pi 5 | planned |
 
 ## The optimizers
@@ -196,6 +196,60 @@ instead of the best one. The ranking of the usable windows could change
 with any of these. This is a reference point in float64 for the
 low-precision study, not a general benchmark of optimizers.
 
+## Emulating number formats
+
+Before training in fp16 or bf16 I need a way to compute in those formats
+that I fully control. [`src/lpopt/numerics.py`](src/lpopt/numerics.py)
+emulates fp32, fp16, bf16 and signed fixed point Qm.n (here Q7.8 and
+Q15.16), with round-to-nearest-even or stochastic rounding.
+
+The rule: to compute `a + b` in fp16, compute it in float64 and round the
+result to fp16. This is exact, not an approximation. For +, -, *, / and
+sqrt, rounding twice (exact value to float64, then float64 to the target)
+gives the same answer as rounding once, provided float64 has at least
+2p + 2 bits of precision, where p is the target's (Figueroa, 1995). fp32
+has p = 24, fp16 11, bf16 8, so all three qualify. The format class refuses
+anything more precise.
+
+How I check it:
+
+| Test | Result |
+|---|---|
+| Conversion of 1,000,000 random float64 values (1e-45 to 1e42) to fp16 and fp32 | bit-identical to NumPy |
+| Same values, as float32, to bf16 | bit-identical to PyTorch |
+| `+ - * / sqrt` on about 1,000,000 random operand pairs per operation and format (random bit patterns, so subnormals and extremes included) | bit-identical to NumPy float32, NumPy float16 and PyTorch bfloat16 |
+| Hand values: ties to even, overflow at 65520 in fp16, sign of zero, saturation in Q7.8 | pass |
+| Stochastic rounding on 200,000 draws | unbiased within 5 standard deviations |
+
+One finding along the way: **PyTorch converts float64 to bfloat16 through
+float32, so it rounds twice.** Take x = 1 + 2^-8 + 2^-30. It sits just above
+the midpoint between the bf16 neighbors 1 and 1 + 2^-7, so the right answer
+is 1.0078125. The float32 step rounds x onto the midpoint exactly, and the
+tie then goes to the even neighbor: torch returns 1.0. On my million random
+values this happened 10 times, and exact rational arithmetic says the
+emulator was the nearest every time. This is why the bf16 check against
+torch uses float32 inputs.
+
+### Two predictions for the low-precision study
+
+![Spacing of representable numbers in each format](docs/img/format_spacing.png)
+
+The figure is computed from the format definitions, not from training.
+It already shows where things should go wrong:
+
+- **H1, Adam's eps disappears in fp16.** The smallest fp16 number is
+  2^-24 ≈ 6e-8, and anything below half of it rounds to 0. Adam's default
+  `eps = 1e-8` is below that, so it rounds to 0. In bf16, which keeps
+  fp32's exponent range, it survives with 8 bits of precision. Both are
+  tested.
+- **H2, Adam's second moment cannot decay in bf16.** Each step multiplies
+  `v` by beta2 = 0.999, a change of 0.1 %. bf16 values are 2^-8 to 2^-7
+  apart in relative terms, so 0.1 % is always less than half a spacing.
+  I checked all 32,512 positive normal bf16 values: `round(0.999 * v)`
+  gives back `v` every time. In fp16 the same product changes every normal
+  value. What this does to training, given that Adam also adds
+  `(1 - beta2) g^2` to `v` at each step, is what J4 measures.
+
 ## Reproduce
 
 Python 3.10 or newer. PyTorch is only the reference in the tests and in the
@@ -206,7 +260,7 @@ python -m venv .venv
 .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
 .venv/bin/pip install -r requirements.txt
 .venv/bin/pip install -e .
-.venv/bin/pytest                          # 107 tests, about 30 s
+.venv/bin/pytest                          # 184 tests, about 35 s
 .venv/bin/python -m experiments.run_all   # results/, about 5 min
 .venv/bin/python -m figures.make_all      # docs/img/
 ```
@@ -216,7 +270,7 @@ On Windows, replace `.venv/bin/` with `.venv\Scripts\`.
 ## Layout
 
 ```
-src/lpopt/       optimizers, MLP, tasks, training loops, figure style
+src/lpopt/       optimizers, number formats, MLP, tasks, training loops, figure style
 experiments/     scripts that write results/ (CSV summaries are committed)
 figures/         scripts that turn results/ into docs/img/
 tests/           pytest + Hypothesis, run by GitHub Actions on every push
@@ -226,6 +280,8 @@ tests/           pytest + Hypothesis, run by GitHub Actions on every push
 
 - D. P. Kingma, J. Ba, *Adam: A Method for Stochastic Optimization*, ICLR 2015.
 - I. Loshchilov, F. Hutter, *Decoupled Weight Decay Regularization*, ICLR 2019.
+- S. A. Figueroa, *When is double rounding innocuous?*, ACM SIGNUM Newsletter 30(3), 1995.
+- IEEE 754-2019, *Standard for Floating-Point Arithmetic*.
 - E. Alpaydin, C. Kaynak, *Optical Recognition of Handwritten Digits*, UCI Machine Learning Repository, 1998, CC BY 4.0.
 - X. Glorot, Y. Bengio, *Understanding the difficulty of training deep feedforward neural networks*, AISTATS 2010 (weight initialization).
 - H. H. Rosenbrock, *An Automatic Method for Finding the Greatest or Least Value of a Function*, The Computer Journal, 1960.

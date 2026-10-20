@@ -3,9 +3,9 @@
     python -m figures.make_all
 """
 
-from figures import differential, digits, rosenbrock
+from figures import differential, digits, formats, rosenbrock
 
 if __name__ == "__main__":
-    for figure in (differential, rosenbrock, digits):
+    for figure in (differential, rosenbrock, digits, formats):
         figure.main()
         print(f"done: {figure.__name__}")
