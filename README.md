@@ -22,8 +22,10 @@ try to train on a microcontroller, an accelerator or an FPGA.
 | J4 | Low-precision study: 600 training runs, 6 formats, 3 precision policies | done |
 | J5 | Step time and optimizer memory on a Raspberry Pi 5 | next |
 
-**Short version of what I found** (details and numbers in the
-[low-precision section](#training-in-low-precision)):
+**Short version of what I measured** (details and numbers in the
+[low-precision section](#training-in-low-precision)). None of it is new
+research. Most of these effects are already documented, see
+[what was already known](#what-was-already-known).
 
 - Adam and AdamW **fail in every run** when their state lives in fp16 or in
   fixed point. Adam's `eps = 1e-8` rounds to 0, the second moment `v`
@@ -417,6 +419,32 @@ rates `eta` (lr = 1, curvature = eta), for 20,000 steps
   denominators is meaningful. The cause is established by the hand-derived
   tests, not by those percentages.
 
+## What was already known
+
+This is a learning and engineering project, not research. I measured
+every effect in this README myself, but almost none of them is a discovery.
+Here is what I found already written down, checked on 2026-10-20 with a web
+search and a search of the PyTorch issue tracker. Not finding a source
+does not mean none exists.
+
+| What this repository shows | Already known? |
+|---|---|
+| Optimizers written from scratch and checked against PyTorch | A very common exercise. What I add is the testing method (differential bench, mutation testing), not the optimizers. |
+| Momentum at lr behaves like SGD at lr / (1 - momentum) | Textbook. |
+| Adam's L2 term is normalized away, AdamW decouples it | Loshchilov and Hutter (2019), the reason AdamW exists. |
+| torch rounds `add(alpha)` once on vector blocks and twice on the tail (J1) | Yes, same mechanism: [pytorch/pytorch#199449](https://github.com/pytorch/pytorch/issues/199449) (opened 2026-10-02, still open) reports it for bf16/fp16 and traces it to `vec::fmadd` against `self + alpha * other` in `aten/src/ATen/native/ufunc/add.h`. I saw it in float32 and float64. |
+| torch converts float64 to bf16 through float32, so it rounds twice (J3) | I found no report in the PyTorch issues (searched "bfloat16 double rounding", "float64 bfloat16 rounding", "double to bfloat16"). Double rounding itself is classic numerical analysis (Figueroa, 1995). |
+| Emulate a format by computing in float64 and rounding | A standard technique, used for instance by QPyTorch (Zhang et al., 2019), with the exactness condition from Figueroa (1995). |
+| H1: Adam's `eps = 1e-8` is 0 in fp16 and the step divides by zero | Yes. Known in practice since at least 2017 ([PyTorch forum](https://discuss.pytorch.org/t/adam-half-precision-nans/1765): raise eps or keep Adam's state in fp32), and analyzed in [arXiv 2307.16189](https://arxiv.org/abs/2307.16189). My P2 policy is that known fix. |
+| Small updates are lost in 16-bit, stochastic rounding brings them back | Yes. Gupta et al. (2015) for stochastic rounding in fixed point, Micikevicius et al. (2018) for fp32 master weights, [Zamirai et al. (2020)](https://arxiv.org/abs/2010.06192) for bf16 weight updates (stochastic rounding and Kahan summation). |
+| H2: bf16 freezes Adam's second moment; AdamW's decay vanishes in 16-bit; Momentum's buffer freezes in fixed point | I found no source naming these three cases specifically. They are direct instances of the lost-small-update effect above, so I would not call them new. |
+| Where SGD stops: `x* = q / (2 eta)` | A direct consequence of how rounding works. I would be surprised if it were new. |
+
+What the repository does add is putting all of this in one place, in a
+form anyone can rerun and check: an emulator proven bit-exact against
+native arithmetic, 600 seeded runs, counters that tie each failure to its
+mechanism, and hand-derived tests for each mechanism.
+
 ## Reproduce
 
 Python 3.10 or newer. PyTorch is only the reference in the tests and in the
@@ -450,6 +478,9 @@ tests/           pytest + Hypothesis, run by GitHub Actions on every push
 - S. A. Figueroa, *When is double rounding innocuous?*, ACM SIGNUM Newsletter 30(3), 1995.
 - S. Gupta, A. Agrawal, K. Gopalakrishnan, P. Narayanan, *Deep Learning with Limited Numerical Precision*, ICML 2015 (stochastic rounding in fixed point).
 - P. Micikevicius et al., *Mixed Precision Training*, ICLR 2018 (fp32 master weights, loss scaling).
+- P. Zamirai, J. Zhang, C. R. Aberger, C. De Sa, *Revisiting BFloat16 Training*, [arXiv 2010.06192](https://arxiv.org/abs/2010.06192), 2020.
+- T. Zhang, Z. Lin, G. Yang, C. De Sa, *QPyTorch: A Low-Precision Arithmetic Simulation Framework*, [arXiv 1910.04540](https://arxiv.org/abs/1910.04540), 2019.
+- J. Yun, *Stabilizing Backpropagation in 16-bit Neural Training with Modified Adam Optimizer*, [arXiv 2307.16189](https://arxiv.org/abs/2307.16189), 2023.
 - IEEE 754-2019, *Standard for Floating-Point Arithmetic*.
 - E. Alpaydin, C. Kaynak, *Optical Recognition of Handwritten Digits*, UCI Machine Learning Repository, 1998, CC BY 4.0.
 - X. Glorot, Y. Bengio, *Understanding the difficulty of training deep feedforward neural networks*, AISTATS 2010 (weight initialization).
