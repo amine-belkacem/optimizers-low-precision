@@ -21,4 +21,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "." makes experiments/ importable: the torch comparison lives there and
+# the tests reuse it rather than duplicating it.
+pythonpath = ["src", "."]

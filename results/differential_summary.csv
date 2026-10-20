@@ -1,0 +1,9 @@
+optimizer,dtype,settings,seeds,final_error_mean,final_error_std,worst_error_any_step
+SGD,float64,{'lr': 0.05},10,6.285e-16,1.386e-16,8.998e-16
+SGD,float32,{'lr': 0.05},10,2.898e-07,1.271e-07,6.464e-07
+Momentum,float64,"{'lr': 0.05, 'momentum': 0.9}",10,3.834e-16,9.469e-17,6.377e-16
+Momentum,float32,"{'lr': 0.05, 'momentum': 0.9}",10,1.811e-07,6.420e-08,2.698e-07
+Adam,float64,{'lr': 0.01},10,2.927e-16,6.392e-17,4.330e-16
+Adam,float32,{'lr': 0.01},10,1.925e-07,3.039e-08,2.489e-07
+AdamW,float64,{'lr': 0.01},10,2.895e-16,8.817e-17,4.575e-16
+AdamW,float32,{'lr': 0.01},10,2.248e-07,6.266e-08,3.554e-07
