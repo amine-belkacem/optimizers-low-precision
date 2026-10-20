@@ -17,8 +17,8 @@ try to train on a microcontroller, an accelerator or an FPGA.
 |---|---|---|
 | J0 | Repository skeleton, CI, figure style | done |
 | J1 | The four optimizers, differential tests against PyTorch, Rosenbrock | done |
-| J2 | NumPy MLP on `digits`, learning-rate sensitivity over 10 seeds | next |
-| J3 | Number format emulator (fp32, fp16, bf16, Qm.n) | planned |
+| J2 | NumPy MLP on `digits`, learning-rate sensitivity over 10 seeds | done |
+| J3 | Number format emulator (fp32, fp16, bf16, Qm.n) | next |
 | J4 | Low-precision study | planned |
 | J5 | Step time and optimizer memory on a Raspberry Pi 5 | planned |
 
@@ -124,6 +124,78 @@ there is nothing to average. Rosenbrock shows how each update rule moves.
 It does not say which optimizer trains a network best, that is what J2 is
 for.
 
+## A real network: MLP on digits
+
+**Setup.** A 64-32-10 tanh MLP with a softmax cross-entropy, forward and
+backward written by hand in [`src/lpopt/mlp.py`](src/lpopt/mlp.py). The
+gradient is checked against central differences (error < 1e-8) and against
+`torch.autograd` (relative error < 1e-12). The data is `digits`: 1797 8x8
+images of handwritten digits (UCI, CC BY 4.0, shipped with scikit-learn).
+It is split once, stratified: 1078 train, 359 validation, 360 test.
+
+**Protocol.** Mini-batches of 64, 50 epochs, 16 learning rates from 1e-4 to
+10 (a third of a decade apart), 10 seeds per point. A seed changes the
+initial weights and the batch order, never the split. Each optimizer's rate
+is chosen on the mean validation loss at the last epoch. The test set is
+only read at that rate. In total, 640 training runs, about 3 minutes on a
+laptop CPU.
+
+I had planned a grid up to 1. A first look with one seed put SGD's best
+rate exactly at 1, on the edge, and a best value on the edge of a grid says
+nothing about what lies past it. So the grid goes to 10.
+
+![Learning-rate sensitivity on digits](docs/img/lr_sensitivity_digits.png)
+
+| Optimizer | Chosen lr | Test accuracy (10 seeds) | Test loss | Usable lr range* |
+|---|---|---|---|---|
+| SGD | 1.0 | 97.11 % ± 0.35 | 0.087 ± 0.010 | 0.22 to 1.0 (0.67 decade) |
+| Momentum 0.9 | 0.22 | 97.53 % ± 0.38 | 0.090 ± 0.014 | 0.022 to 0.46 (1.33 decades) |
+| Adam | 0.022 | 97.28 % ± 0.39 | 0.091 ± 0.012 | 0.0046 to 0.046 (1.0 decade) |
+| AdamW, decay 0.01 | 0.022 | 97.31 % ± 0.37 | 0.087 ± 0.010 | 0.0046 to 0.046 (1.0 decade) |
+
+\* rates whose mean validation accuracy is within one percentage point of
+the optimizer's best rate. I fixed this rule before looking at which
+optimizer it favors. Source: [`results/lr_sweep_digits_best.csv`](results/lr_sweep_digits_best.csv).
+
+What the numbers say, and what they do not:
+
+- **At its best rate, no optimizer wins.** The four test accuracies sit
+  within 0.42 points, about one standard deviation. With 360 test images,
+  one image is 0.28 points. On this problem, ranking the optimizers by
+  their best score would be reading noise.
+- **The difference is in how much tuning they need.** Momentum keeps working
+  over 1.33 decades of learning rate, Adam and AdamW over 1.0, plain SGD over
+  0.67. Adam having a narrower window than Momentum goes against what is
+  often said about Adam. That holds for this network, this criterion and 50
+  epochs, nothing more.
+- **Momentum 0.9 at lr behaves like SGD at 10·lr**, the classic effective
+  rate `lr / (1 - momentum)`. Up to an effective rate of 1 the two curves
+  lie on top of each other, within the seed spread. Past that point the
+  equivalence breaks: at an effective rate of 4.6, Momentum still reaches
+  98.4 % on validation while SGD has collapsed to chance.
+
+![Momentum against SGD at the same effective learning rate](docs/img/momentum_effective_lr.png)
+
+- **Lower training loss does not mean a better model.** At their chosen
+  rates, Adam ends with a training loss of 1.2e-3 and SGD with 9.8e-3, 8
+  times higher, yet their validation losses are 0.059 and 0.063. Most of
+  what Adam gains on the training set does not carry over.
+- **Adam and AdamW are almost the same here.** Per step the decay removes
+  `lr x 0.01` of each weight, 2e-4 at the chosen rate. Over 850 steps it
+  does change the weights, but the test results stay inside the noise.
+- **Too large a rate does not blow up, it collapses.** No run produced an
+  infinite or NaN loss. Past the window, accuracy falls to 10 %, the chance
+  level, with a finite loss. I suspect the tanh units saturate, but I have
+  not checked it.
+
+![Training curves at the chosen learning rates](docs/img/training_curves_digits.png)
+
+Limits: one small dataset, one architecture, a fixed budget of 50 epochs
+with no learning-rate schedule, and the rate is picked on the last epoch
+instead of the best one. The ranking of the usable windows could change
+with any of these. This is a reference point in float64 for the
+low-precision study, not a general benchmark of optimizers.
+
 ## Reproduce
 
 Python 3.10 or newer. PyTorch is only the reference in the tests and in the
@@ -134,8 +206,8 @@ python -m venv .venv
 .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
 .venv/bin/pip install -r requirements.txt
 .venv/bin/pip install -e .
-.venv/bin/pytest                          # 85 tests, about 25 s
-.venv/bin/python -m experiments.run_all   # results/, about 70 s
+.venv/bin/pytest                          # 107 tests, about 30 s
+.venv/bin/python -m experiments.run_all   # results/, about 5 min
 .venv/bin/python -m figures.make_all      # docs/img/
 ```
 
@@ -144,7 +216,7 @@ On Windows, replace `.venv/bin/` with `.venv\Scripts\`.
 ## Layout
 
 ```
-src/lpopt/       optimizers, tasks, training loop, figure style
+src/lpopt/       optimizers, MLP, tasks, training loops, figure style
 experiments/     scripts that write results/ (CSV summaries are committed)
 figures/         scripts that turn results/ into docs/img/
 tests/           pytest + Hypothesis, run by GitHub Actions on every push
@@ -154,6 +226,8 @@ tests/           pytest + Hypothesis, run by GitHub Actions on every push
 
 - D. P. Kingma, J. Ba, *Adam: A Method for Stochastic Optimization*, ICLR 2015.
 - I. Loshchilov, F. Hutter, *Decoupled Weight Decay Regularization*, ICLR 2019.
+- E. Alpaydin, C. Kaynak, *Optical Recognition of Handwritten Digits*, UCI Machine Learning Repository, 1998, CC BY 4.0.
+- X. Glorot, Y. Bengio, *Understanding the difficulty of training deep feedforward neural networks*, AISTATS 2010 (weight initialization).
 - H. H. Rosenbrock, *An Automatic Method for Finding the Greatest or Least Value of a Function*, The Computer Journal, 1960.
 - [`torch.optim` documentation](https://pytorch.org/docs/stable/optim.html), the reference implementation.
 

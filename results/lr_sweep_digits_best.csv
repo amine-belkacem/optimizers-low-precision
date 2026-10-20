@@ -1,0 +1,5 @@
+optimizer,chosen_lr,val_loss_mean,test_loss_mean,test_loss_std,test_accuracy_mean,test_accuracy_std,seeds,usable_lr_min,usable_lr_max,usable_lr_count,usable_decades
+SGD,1.0000e+00,0.0633,0.0872,0.0097,0.9711,0.0035,10,2.1544e-01,1.0000e+00,3,0.67
+Momentum,2.1544e-01,0.0601,0.0904,0.0137,0.9753,0.0038,10,2.1544e-02,4.6416e-01,5,1.33
+Adam,2.1544e-02,0.0591,0.0905,0.0117,0.9728,0.0039,10,4.6416e-03,4.6416e-02,4,1.00
+AdamW,2.1544e-02,0.0558,0.0867,0.0095,0.9731,0.0037,10,4.6416e-03,4.6416e-02,4,1.00
