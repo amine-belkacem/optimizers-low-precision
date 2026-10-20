@@ -30,6 +30,20 @@ def test_run_stops_on_divergence_and_keeps_only_computed_points():
     assert np.all(np.isfinite(result.losses)), f"ECHEC: obtenu {result.losses}, attendu que des valeurs finies"
 
 
+def test_run_treats_a_fixed_point_nan_as_a_failure():
+    # Q7.8 Adam at the optimum: g = 0, m = v = 0, eps rounds to 0, 0 / 0 = NaN.
+    from lpopt.lowprec import Policy, make
+    from lpopt.numerics import Q7_8
+
+    class AtOptimum(Quadratic):
+        def initial_params(self):
+            return super().initial_params(0.0)
+
+    result = run(AtOptimum((1.0,)), lambda p: make("Adam", p, Policy.make("P1", Q7_8)), n_steps=10)
+    assert result.diverged, "ECHEC: obtenu diverged=False, attendu True"
+    assert len(result.losses) == 1, f"ECHEC: obtenu {len(result.losses)} points, attendu 1"
+
+
 def test_run_rejects_zero_steps():
     with pytest.raises(ValueError):
         run(UnitQuadratic((1.0,)), lambda p: SGD(p, lr=0.1), n_steps=0)

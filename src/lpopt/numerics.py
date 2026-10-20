@@ -30,6 +30,14 @@ import numpy as np
 ROUNDING_MODES = ("nearest", "stochastic")
 
 
+class NonRepresentableError(ValueError):
+    """A value has no representation in the format (NaN in fixed point).
+
+    In training this is a failure of the run, like an infinite loss in
+    floating point, and the training loops treat it that way.
+    """
+
+
 def _check_mode(rounding: str, rng: np.random.Generator | None) -> None:
     if rounding not in ROUNDING_MODES:
         raise ValueError(f"rounding must be one of {ROUNDING_MODES}, got {rounding!r}")
@@ -165,7 +173,7 @@ class FixedFormat:
         _check_mode(rounding, rng)
         x = np.asarray(x, dtype=np.float64)
         if np.isnan(x).any():
-            raise ValueError(f"{self.name}: NaN has no fixed-point representation")
+            raise NonRepresentableError(f"{self.name}: NaN has no fixed-point representation")
         clipped = np.clip(x, self.min_value, self.max_value)  # also saturates +-inf
         n = _round_integers(np.ldexp(clipped, self.fraction_bits), rounding, rng)
         # Rounding can step one resolution past max_value (e.g. 2^m - 2^-(n+1)),

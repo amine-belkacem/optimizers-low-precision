@@ -8,6 +8,7 @@ from typing import Protocol
 
 import numpy as np
 
+from lpopt.numerics import NonRepresentableError
 from lpopt.optimizers import Optimizer
 
 # A loss above this is treated as a divergence. Rosenbrock starts at 24.2,
@@ -49,7 +50,11 @@ def run(task: Task, make_optimizer: Callable[[list[np.ndarray]], Optimizer], n_s
     # it is detected below instead of printing a warning per step.
     with np.errstate(over="ignore", invalid="ignore"):
         for _ in range(n_steps):
-            opt.step(task.grads(params))
+            try:
+                opt.step(task.grads(params))
+            except NonRepresentableError:  # NaN in fixed point: the run failed
+                diverged = True
+                break
             loss = task.loss(params)
             if not np.isfinite(loss) or loss > DIVERGENCE_LOSS:
                 diverged = True
@@ -93,11 +98,14 @@ def train_classifier(
     epochs: int,
     batch_size: int,
     rng: np.random.Generator,
+    on_epoch: Callable[[int], None] | None = None,
 ) -> ClassifierHistory:
     """Mini-batch training. `rng` only draws the order of the samples.
 
     The last incomplete batch of an epoch is kept, so every sample is seen
-    once per epoch. `params` is updated in place.
+    once per epoch. `params` is updated in place. `on_epoch(epoch)` is
+    called after each completed epoch (1-based), for instance to read the
+    optimizer's counters.
     """
     if epochs < 1 or batch_size < 1:
         raise ValueError(f"epochs and batch_size must be >= 1, got {epochs} and {batch_size}")
@@ -115,14 +123,20 @@ def train_classifier(
 
     with np.errstate(over="ignore", invalid="ignore"):
         evaluate()
-        for _ in range(epochs):
+        for epoch in range(1, epochs + 1):
             order = rng.permutation(n)
-            for start in range(0, n, batch_size):
-                batch = order[start : start + batch_size]
-                _, grads = model.loss_and_grads(params, data.X_train[batch], data.y_train[batch])
-                optimizer.step(grads)
-                history.n_steps += 1
+            try:
+                for start in range(0, n, batch_size):
+                    batch = order[start : start + batch_size]
+                    _, grads = model.loss_and_grads(params, data.X_train[batch], data.y_train[batch])
+                    optimizer.step(grads)
+                    history.n_steps += 1
+            except NonRepresentableError:  # NaN in fixed point: the run failed
+                history.diverged = True
+                break
             if not evaluate():
                 history.diverged = True
                 break
+            if on_epoch is not None:
+                on_epoch(epoch)
     return history

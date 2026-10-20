@@ -64,6 +64,30 @@ def test_divergence_is_detected(data):
     assert all(np.isfinite(history.train_loss)), f"ECHEC: valeurs non finies conservees: {history.train_loss}"
 
 
+def test_on_epoch_is_called_after_each_epoch(data):
+    rng = np.random.default_rng(0)
+    model = MLP((64, 32, 10))
+    params = model.init_params(rng)
+    seen = []
+    train_classifier(model, params, Adam(params, lr=1e-2), data, 3, 64, rng, on_epoch=seen.append)
+    assert seen == [1, 2, 3], f"ECHEC: obtenu {seen}, attendu [1, 2, 3]"
+
+
+def test_fixed_point_adam_fails_cleanly(data):
+    # Adam with Q7.8 everywhere divides by a zero denominator during the
+    # first epoch (see test_lowprec.py): the run must stop, not crash.
+    from lpopt.lowprec import Policy, make
+    from lpopt.numerics import Q7_8
+
+    rng = np.random.default_rng(0)
+    model = MLP((64, 32, 10))
+    params = model.init_params(rng)
+    opt = make("Adam", params, Policy.make("P1", Q7_8), lr=2e-2)
+    history = train_classifier(model, params, opt, data, 2, 64, rng)
+    assert history.diverged, "ECHEC: obtenu diverged=False, attendu True"
+    assert len(history.val_accuracy) == 1, f"ECHEC: obtenu {len(history.val_accuracy)} points, attendu 1"
+
+
 def test_invalid_epochs_rejected(data):
     with pytest.raises(ValueError):
         train(data, seed=0, epochs=0, lr=1e-2)

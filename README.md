@@ -19,8 +19,24 @@ try to train on a microcontroller, an accelerator or an FPGA.
 | J1 | The four optimizers, differential tests against PyTorch, Rosenbrock | done |
 | J2 | NumPy MLP on `digits`, learning-rate sensitivity over 10 seeds | done |
 | J3 | Number format emulator (fp32, fp16, bf16, Qm.n) | done |
-| J4 | Low-precision study | next |
-| J5 | Step time and optimizer memory on a Raspberry Pi 5 | planned |
+| J4 | Low-precision study: 600 training runs, 6 formats, 3 precision policies | done |
+| J5 | Step time and optimizer memory on a Raspberry Pi 5 | next |
+
+**Short version of what I found** (details and numbers in the
+[low-precision section](#training-in-low-precision)):
+
+- Adam and AdamW **fail in every run** when their state lives in fp16 or in
+  fixed point. Adam's `eps = 1e-8` rounds to 0, the second moment `v`
+  underflows to 0, and the step divides by zero. Keeping the optimizer
+  state in fp32 fixes it. Stochastic rounding does not.
+- **AdamW's weight decay disappears** in every 16-bit format: the factor
+  `1 - lr·wd = 0.99978` rounds to 1, so AdamW becomes Adam, bit for bit.
+- In bf16, Adam's second moment **never decays** (100 % of the steps), as
+  predicted from the format alone, and yet accuracy does not move.
+- SGD and Momentum still reach float64 accuracy with up to 66 % of their
+  parameters stuck at each step. The one real loss, Momentum in 16-bit
+  fixed point (96.6 % vs 98.6 %), comes from a momentum buffer that rounding
+  keeps from decaying. An fp32 buffer or stochastic rounding brings it back.
 
 ## The optimizers
 
@@ -250,6 +266,157 @@ It already shows where things should go wrong:
   value. What this does to training, given that Adam also adds
   `(1 - beta2) g^2` to `v` at each step, is what J4 measures.
 
+## Training in low precision
+
+### Setup
+
+[`src/lpopt/lowprec.py`](src/lpopt/lowprec.py) runs the four optimizers
+in an emulated format. Every elementary operation is rounded, in exactly
+the order the float64 code of J1 evaluates it. The check: in fp16 and
+fp32, the emulation gives **bit-identical** parameters to the J1 code run on
+native `np.float16` / `np.float32` arrays (9 settings, 200 steps, 3
+parameter arrays). So the emulation is the J1 code, plus formats NumPy does
+not have.
+
+A precision policy says what lives in which format:
+
+| Policy | Parameters and gradients | Optimizer state and arithmetic | Rounding |
+|---|---|---|---|
+| P1 | format | format | to nearest |
+| P2 | format | fp32 | to nearest |
+| P3 | format | format | stochastic |
+
+The network itself computes in float64 from parameters that hold values of
+the format, and its gradients are rounded to the format before the
+optimizer sees them. The study is about the optimizer, so that is where
+every operation is emulated.
+
+Same MLP, data split, batch size and 50 epochs as in J2. Each optimizer
+uses its learning rate chosen in float64 (J2). 15 configurations x 4
+optimizers x 10 seeds = **600 runs**, about 5 minutes on 7 processes. The
+optimizer counts what goes wrong at each step: parameters that did not
+move although their gradient was not zero, decays that round back to the
+same value, zero denominators, gradients that underflow.
+
+![Validation accuracy in every format and policy](docs/img/precision_accuracy.png)
+
+![What the format does to each optimizer](docs/img/precision_mechanisms.png)
+
+Numbers: [`results/precision_summary.csv`](results/precision_summary.csv)
+(one row per optimizer, format and policy).
+
+### H1: Adam divides by zero in fp16 and in fixed point
+
+Adam and AdamW fail in **10 runs out of 10**, during the first epoch, in
+fp16 P1 and P3 and in both fixed-point formats under P1 and P3. Hand
+derivation of one fp16 step (`p = 1`, `g = 1e-4`), checked by a test:
+
+- `v = (fp16(0.001) x 1e-4) x 1e-4`: the first product is already a
+  subnormal (1.19e-7) and the second one, 1.2e-11, rounds to **0**;
+- `m = fp16(0.1) x 1e-4 = 1.0e-5`, not zero;
+- `denominator = sqrt(0) / c + fp16(1e-8) = 0 + 0 = 0`, so the step is `m / 0 = inf`.
+
+In Q15.16 and Q7.8, `eps` and most of `v` are below the resolution, so
+97.7 % to 100 % of the denominators are 0. Stochastic rounding (P3)
+does not help: it cannot bring back a constant that was 0 to begin with,
+nor a `v` that is a hundred times smaller than the resolution. **Keeping the
+state in fp32 (P2) brings every run back**, to 98.3 % in fp16, Q15.16 and Q7.8.
+
+### H2: Adam's second moment never decays in bf16
+
+As predicted in J3 from the format alone, `beta2 * v` rounds back to `v` in
+**100 %** of the steps in bf16 P1 and P3, in real training this time. And it
+costs nothing measurable here: 98.1 % ± 0.5 against 98.3 % ± 0.6 in float64,
+validation loss 0.0595 against 0.0591. My reading, which I have not tested:
+without the decay, `v` becomes a running sum of `(1 - beta2) g^2`, so Adam
+behaves more like Adagrad, whose steps keep shrinking. Over 850 steps that
+seems harmless. Over a much longer training it might not be.
+
+### AdamW's weight decay disappears in 16-bit formats
+
+At AdamW's chosen rate, the decay multiplies each weight by
+`1 - lr·wd = 1 - 0.021544 x 0.01 = 0.99978`. Half the relative spacing of
+fp16 is at least 2^-12 = 2.4e-4, more than 2.2e-4, so the constant itself
+rounds to 1 (P1), and with an fp32 constant (P2) the decayed value rounds
+back to the same fp16 when it is stored. A test checks every normal fp16
+value. bf16 is coarser still. **In fp16 and bf16, AdamW is Adam,
+bit for bit**: same validation loss for each seed in fp16 P2, bf16 P1 and
+bf16 P2. In bf16 P3 the two differ only because the skipped decay still
+draws random numbers for its stochastic rounding, which shifts the random
+stream. In Q15.16 with fp32 state
+part of the decay survives (lost 7.8 % of the time), and AdamW then differs
+from Adam (validation loss 0.0555 against 0.0588).
+
+### SGD and Momentum: many stuck parameters, almost no damage
+
+In bf16, 40 % (SGD) and 66 % (Momentum) of the parameter updates are
+lost at each step, and the accuracy is the float64 one within noise. The
+small updates that disappear apparently do not matter much here. The large
+ones still go through.
+
+The exception is **Momentum in Q7.8 P1: 96.6 % ± 0.6 instead of 98.6 % ± 0.4**,
+and a validation loss three times higher (0.18 against 0.06). Paradoxically
+fewer parameters are stuck than with an fp32 buffer (P2: 88 % stuck, 98.2 %
+accuracy). The counters point to the momentum buffer: it is frozen in
+**92.9 %** of the steps. Small buffers stop decaying, and they keep pushing.
+Hand example, checked by a test: a buffer of 4 x 2^-8 times 0.9 is 3.6
+resolutions, which rounds back to 4. `lr x buffer` is 0.86 resolution,
+which rounds to 1. With zero gradients for 20 steps the parameter still
+moves by 21 resolutions in total (to 0.918), where float64 would stop at
+0.970.
+
+![Momentum in Q7.8 under the three policies](docs/img/precision_momentum_q78.png)
+
+An fp32 buffer (P2) or stochastic rounding (P3, 98.4 %) fixes it. With
+stochastic rounding the buffer still stays the same in 78 % of the steps,
+but its decay is right on average. What hurts is the systematic bias of
+round-to-nearest, not the fact that a value sometimes does not change.
+
+### Where SGD stops: a rule that predicts it
+
+On `f(x) = x^2 / 2` the SGD step is `round(eta * x)`, and it vanishes once it
+is at most half the spacing of the format around `x`. Where the spacing is a
+constant `q` (fixed point, or the subnormal range of a float), SGD stops just
+under `x* = q / (2 eta)`. One run with 60 coordinates covers 60 effective
+rates `eta` (lr = 1, curvature = eta), for 20,000 steps
+([`experiments/quadratic_stall.py`](experiments/quadratic_stall.py)).
+
+![Where SGD stops in each format](docs/img/quadratic_stall.png)
+
+- **Never leaves x0 = 1** for `eta <= 2.38e-4` in fp16 and `eta <= 1.80e-3` in
+  bf16 and Q7.8. The predicted thresholds are 2^-12 = 2.44e-4 and
+  2^-9 = 1.95e-3, and the next point of the grid is above them in each case.
+- **Fixed point: 96 cases out of 96** end inside the predicted interval
+  `(x* - q, x*]`. fp32: every case either follows the exact curve or ends
+  inside it.
+- **fp16 and bf16**: when `eta` is between 2^-(p+1) and 2^-p (p = 11 in
+  fp16, 8 in bf16), SGD stops much earlier, in the normal range, where the
+  sawtooth relative spacing is widest. All 9 such cases stop with a step of
+  0.50 spacing, as the rule says, and so does one case just above the
+  window (0.503). Five more cases stop with a step of 0.55 to 0.75 spacing,
+  and **I have not explained those yet**.
+- **Stochastic rounding has no floor**: 53 % to 87 % of the (eta, seed) pairs end
+  at exactly 0.
+
+### Limits
+
+- Every optimizer uses its float64 learning rate. Low precision may move the
+  best rate, and a sweep per configuration would cost 16 times more.
+- Only the optimizer is emulated. The network computes in float64 and only
+  its gradients are rounded. A real fp16 forward and backward pass would
+  add its own errors.
+- P2 keeps the parameters in the low format. Full mixed precision also keeps
+  an fp32 master copy of the weights, which would remove most stuck
+  parameters. That is a natural next experiment, not done here.
+- No loss scaling (the usual fix for fp16 gradient underflow). Here only
+  0.4 % to 1.8 % of the fp16 gradients underflowed.
+- One small task, 50 epochs. The "no measurable cost" results (H2, stuck
+  parameters) are about this setting, not a general claim.
+- When a run fails in its first epoch, its counters include the steps after
+  the parameters became non-finite. There, only the presence of zero
+  denominators is meaningful. The cause is established by the hand-derived
+  tests, not by those percentages.
+
 ## Reproduce
 
 Python 3.10 or newer. PyTorch is only the reference in the tests and in the
@@ -260,8 +427,8 @@ python -m venv .venv
 .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
 .venv/bin/pip install -r requirements.txt
 .venv/bin/pip install -e .
-.venv/bin/pytest                          # 184 tests, about 35 s
-.venv/bin/python -m experiments.run_all   # results/, about 5 min
+.venv/bin/pytest                          # 237 tests, about 40 s
+.venv/bin/python -m experiments.run_all   # results/, about 15 min on 8 cores
 .venv/bin/python -m figures.make_all      # docs/img/
 ```
 
@@ -281,6 +448,8 @@ tests/           pytest + Hypothesis, run by GitHub Actions on every push
 - D. P. Kingma, J. Ba, *Adam: A Method for Stochastic Optimization*, ICLR 2015.
 - I. Loshchilov, F. Hutter, *Decoupled Weight Decay Regularization*, ICLR 2019.
 - S. A. Figueroa, *When is double rounding innocuous?*, ACM SIGNUM Newsletter 30(3), 1995.
+- S. Gupta, A. Agrawal, K. Gopalakrishnan, P. Narayanan, *Deep Learning with Limited Numerical Precision*, ICML 2015 (stochastic rounding in fixed point).
+- P. Micikevicius et al., *Mixed Precision Training*, ICLR 2018 (fp32 master weights, loss scaling).
 - IEEE 754-2019, *Standard for Floating-Point Arithmetic*.
 - E. Alpaydin, C. Kaynak, *Optical Recognition of Handwritten Digits*, UCI Machine Learning Repository, 1998, CC BY 4.0.
 - X. Glorot, Y. Bengio, *Understanding the difficulty of training deep feedforward neural networks*, AISTATS 2010 (weight initialization).
